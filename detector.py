@@ -1,7 +1,16 @@
+import torch
+from mmdet3d.apis import inference_detector, init_model
+import numpy as np
+import os
+
 class Detector:
     def __init__(self):
-        # Add your initialization logic here
-        pass
+        # Use absolute paths and add debug information
+        self.config_file = '/home/tsrlab/CARLA_0.9.15/Edison/bevfusion_lidar-cam_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py'
+        self.checkpoint_file = '/home/tsrlab/CARLA_0.9.15/Edison/bevfusion_lidar-cam_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d-5239b1af.pth'
+
+        self.model = init_model(self.config_file, self.checkpoint_file, device='cuda:0')
+        # pass
 
     def sensors(self):  # pylint: disable=no-self-use
         """
@@ -26,21 +35,33 @@ class Detector:
 
         """
         sensors = [
-            {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': -0.4, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                      'width': 1280, 'height': 720, 'fov': 100, 'id': 'Left'},
+            # Front RGB Camera - captures the forward view
+            {'type': 'sensor.camera.rgb', 'x': 1.5, 'y': 0.0, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
+             'width': 1280, 'height': 720, 'fov': 100, 'id': 'Front'},
 
-            {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': 0.4, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                      'width': 1280, 'height': 720, 'fov': 100, 'id': 'Right'},
+            # Left RGB Camera - covers the left side of the vehicle
+            # {'type': 'sensor.camera.rgb', 'x': 0.7, 'y': -0.4, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': -45.0,
+            # 'width': 1280, 'height': 720, 'fov': 100, 'id': 'Left'},
 
+            # Right RGB Camera - covers the right side of the vehicle
+            #{'type': 'sensor.camera.rgb', 'x': 0.7, 'y': 0.4, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': 45.0,
+            # 'width': 1280, 'height': 720, 'fov': 100, 'id': 'Right'},
+
+            # Rear RGB Camera - captures the view behind the vehicle
+            #{'type': 'sensor.camera.rgb', 'x': -1.5, 'y': 0.0, 'z': 1.60, 'roll': 0.0, 'pitch': 0.0, 'yaw': 180.0,
+            # 'width': 1280,'height': 720, 'fov': 100, 'id': 'Rear'},
+
+            # LiDAR - mounted at the top to provide 360-degree point cloud data
             {'type': 'sensor.lidar.ray_cast', 'x': 0.7, 'y': 0.0, 'z': 1.60, 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0,
-                      'range': 50, 
-                      'rotation_frequency': 20, 'channels': 64,
-                      'upper_fov': 4, 'lower_fov': -20, 'points_per_second': 2304000,
-                      'id': 'LIDAR'},
+             'range': 50, 'rotation_frequency': 20, 'channels': 64, 'upper_fov': 4, 'lower_fov': -20,
+             'points_per_second': 2304000, 'id': 'LIDAR'},
 
-            {'type': 'sensor.other.gnss', 'x': 0.7, 'y': -0.4, 'z': 1.60, 'id': 'GPS'}
+            # GPS Sensor - provides absolute positioning
+            {'type': 'sensor.other.gnss', 'x': 0.7, 'y': -0.4, 'z': 1.60, 'id': 'GPS'},
+
+            # IMU Sensor - captures acceleration and rotation to track vehicle dynamics
+            {'type': 'sensor.other.imu', 'x': 0.7, 'y': 0.0, 'z': 1.60, 'id': 'IMU'}
         ]
-
         return sensors
 
     def detect(self, sensor_data):
@@ -62,6 +83,53 @@ class Detector:
                 det_score : numpy.ndarray
                     The confidence score for each predicted bounding box, shape (N, 1) corresponding to the above bounding box.
         """
+        # 1. Extract camera and LiDAR data
+        camera_data = None
+        lidar_data = None
+        for sensor_id, (frame_id, data) in sensor_data.items():
+            if sensor_id == 'Front':  # Assuming front camera data for detection
+                camera_data = data[..., :3]  # RGB image, ignore alpha
+            elif sensor_id == 'LIDAR':
+                lidar_data = data  # LiDAR point cloud data, shape (N, 4)
+
+        # 2. Pre-process data for the model
+        if camera_data is None or lidar_data is None:
+            raise ValueError("Both camera and LiDAR data are required for BEVFusion.")
+
+        # Convert numpy array to torch tensor
+        camera_data = torch.from_numpy(camera_data).float().permute(2, 0, 1).unsqueeze(0).to('cuda:0')  # (1, C, H, W)
+        lidar_data = torch.from_numpy(lidar_data).float().unsqueeze(0).to('cuda:0')  # (1, N, 4)
+
+        # Create input dictionary
+        inputs = {
+            'img': [camera_data],  # BEVFusion expects a list of images
+            'points': [lidar_data]  # LiDAR point cloud data
+        }
+
+        # 3. Run inference
+        result = inference_detector(self.model, inputs)
+
+        # 4. Post-process results to extract bounding boxes, classes, and scores
+        det_boxes, det_class, det_score = [], [], []
+        for res in result[0]:  # Assuming detection result is in the format of list of dictionaries
+            boxes = res['boxes_3d'].tensor.cpu().numpy()  # Extract bounding boxes
+            scores = res['scores_3d'].cpu().numpy()  # Confidence scores
+            labels = res['labels_3d'].cpu().numpy()  # Detected classes
+
+            det_boxes.append(boxes)
+            det_score.append(scores)
+            det_class.append(labels)
+
+        # Convert list to numpy arrays
+        det_boxes = np.concatenate(det_boxes, axis=0) if det_boxes else np.array([])
+        det_class = np.concatenate(det_class, axis=0) if det_class else np.array([])
+        det_score = np.concatenate(det_score, axis=0) if det_score else np.array([])
+
+        # Return detection results in the expected format
+        return {
+            'det_boxes': det_boxes,  # Detected bounding boxes
+            'det_class': det_class,  # Object classes (0: vehicle, 1: pedestrian, 2: cyclist)
+            'det_score': det_score  # Confidence scores
+        }
         return {}
 
-    
