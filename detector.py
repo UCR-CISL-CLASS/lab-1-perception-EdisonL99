@@ -10,12 +10,10 @@ class Detector:
         self.config_file = '/home/tsr/CARNATIONS/mmdetection3d/pointpillars_hv_secfpn_8xb6-160e_kitti-3d-car.py'
         self.checkpoint_file = '/home/tsr/CARNATIONS/mmdetection3d/hv_pointpillars_secfpn_6x8_160e_kitti-3d-car_20220331_134606-d42d15ed.pth'      
 
-	# Load configuration file
+	 # Load configuration file and model
         config = Config.fromfile(self.config_file)
+        self.model = init_model(config, checkpoint=self.checkpoint_file, device='cuda:0')
         
-        # Initialize the model with the checkpoint
-        self.model = init_model(self.config_file, checkpoint=self.checkpoint_file, device='cuda:0')
-
         # pass
 
     def sensors(self):  # pylint: disable=no-self-use
@@ -90,7 +88,7 @@ class Detector:
                     The confidence score for each predicted bounding box, shape (N, 1) corresponding to the above bounding box.
         """
         
-        # Step 1: Retrieve LiDAR data
+ 	# Retrieve LiDAR data
         lidar_frame_id, lidar_data = sensor_data.get('LIDAR', (None, None))
 
         if lidar_data is None:
@@ -104,7 +102,7 @@ class Detector:
         # Convert lidar data to torch tensor and move to GPU if needed
         lidar_data_tensor = torch.tensor(lidar_data, dtype=torch.float32).to('cuda:0')
 
-        # Step 2: Run inference
+        # Run inference
         try:
             detection_results, _ = inference_detector(self.model, lidar_data_tensor)
         except Exception as e:
@@ -115,10 +113,10 @@ class Detector:
                 "det_boxes": np.zeros((0, 8, 3))
             }
 
-        # Step 3: Extract prediction instances
+        # Extract prediction instances
         prediction_instances = detection_results.pred_instances_3d
 
-        # Step 4: Check if there are any detected instances
+        # Check if there are any detected instances
         if len(prediction_instances.bboxes_3d) == 0:
             return {
                 "det_class": np.array([]),
@@ -126,22 +124,22 @@ class Detector:
                 "det_boxes": np.zeros((0, 8, 3))
             }
 
-        # Step 5: Extract labels, scores, and bounding boxes
+        # Extract labels, scores, and bounding boxes
         detected_labels = prediction_instances.labels_3d.detach().cpu().numpy().reshape(-1)
         detected_scores = prediction_instances.scores_3d.detach().cpu().numpy().reshape(-1)
         bounding_boxes_3d = prediction_instances.bboxes_3d
 
-        # Step 6: Sort scores in descending order and get integer indices
+        # Sort scores in descending order and get integer indices
         sorted_indices = np.argsort(-detected_scores)
         detected_labels = detected_labels[sorted_indices]
         detected_scores = detected_scores[sorted_indices]
         bounding_boxes_3d = bounding_boxes_3d[sorted_indices]
 
-        # Step 7: Initialize the array for storing corner points of bounding boxes
+        # Initialize the array for storing corner points of bounding boxes
         num_objects = len(bounding_boxes_3d)
         corner_points_array = np.zeros((num_objects, 8, 3))
 
-        # Step 8: Calculate the corner points of each bounding box
+        # Calculate the corner points of each bounding box
         for idx in range(num_objects):
             box_params = bounding_boxes_3d[idx].cpu().numpy().flatten()
             x, y, z, length, width, height, orientation = box_params
@@ -158,7 +156,7 @@ class Detector:
                 [x + length, y, z + height]
             ]
 
-        # Step 9: Return the sorted detection results
+        # Return the sorted detection results
         return {
             "det_class": detected_labels.reshape(-1, 1),
             "det_score": detected_scores.reshape(-1, 1),
